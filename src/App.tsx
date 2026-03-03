@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 
 // Using standard Material Symbols for some icons to match the design exactly
@@ -15,6 +15,31 @@ export default function App() {
   const [currentSlide, setCurrentSlide] = useState(0);
   const [vote, setVote] = useState<"yes" | "no" | null>(null);
   const [results, setResults] = useState({ yes: 0, no: 0, total: 0 });
+  const socketRef = useRef<WebSocket | null>(null);
+
+  useEffect(() => {
+    // Connect to WebSocket server
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(`${protocol}//${window.location.host}`);
+    socketRef.current = socket;
+
+    socket.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      if (message.type === "SYNC_VOTES" || message.type === "VOTE_UPDATE") {
+        const yes = message.votes.yes || 0;
+        const no = message.votes.no || 0;
+        setResults({
+          yes,
+          no,
+          total: yes + no
+        });
+      }
+    };
+
+    return () => {
+      socket.close();
+    };
+  }, []);
 
   const nextSlide = () => setCurrentSlide((prev) => Math.min(prev + 1, 8));
   const prevSlide = () => setCurrentSlide((prev) => Math.max(prev - 1, 0));
@@ -24,12 +49,8 @@ export default function App() {
   };
 
   const submitVote = () => {
-    if (vote) {
-      setResults(prev => ({
-        ...prev,
-        [vote]: prev[vote] + 1,
-        total: prev.total + 1
-      }));
+    if (vote && socketRef.current?.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: "VOTE", optionId: vote }));
       nextSlide();
     }
   };
@@ -40,7 +61,9 @@ export default function App() {
   };
 
   const resetVotes = () => {
-    setResults({ yes: 0, no: 0, total: 0 });
+    if (socketRef.current?.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: "RESET_VOTES" }));
+    }
     setVote(null);
   };
 
