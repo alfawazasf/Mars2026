@@ -3,8 +3,37 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
+import { initializeApp } from "firebase/app";
+import { 
+  getFirestore, 
+  collection, 
+  addDoc, 
+  onSnapshot, 
+  query, 
+  where, 
+  serverTimestamp, 
+  Timestamp,
+  deleteDoc,
+  getDocs,
+  writeBatch
+} from "firebase/firestore";
+
+// Firebase configuration
+const firebaseConfig = {
+  apiKey: "AIzaSyBnt-GOtsgN3FmRkxVFXn8V0qpz2aXAkvY",
+  authDomain: "mars-364db.firebaseapp.com",
+  projectId: "mars-364db",
+  storageBucket: "mars-364db.firebasestorage.app",
+  messagingSenderId: "239514122671",
+  appId: "1:239514122671:web:9474059d346315f312575a",
+  measurementId: "G-VE41DF1VML"
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
 
 // Using standard Material Symbols for some icons to match the design exactly
 const MaterialIcon = ({ name, className = "" }: { name: string; className?: string }) => (
@@ -15,30 +44,38 @@ export default function App() {
   const [currentSlide, setCurrentSlide] = useState(0);
   const [vote, setVote] = useState<"yes" | "no" | null>(null);
   const [results, setResults] = useState({ yes: 0, no: 0, total: 0 });
-  const socketRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
-    // Connect to WebSocket server
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(`${protocol}//${window.location.host}`);
-    socketRef.current = socket;
+    // Calculate the timestamp for 10 minutes ago
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+    
+    // Create a query for votes in the last 10 minutes
+    const q = query(
+      collection(db, "votes"),
+      where("timestamp", ">=", Timestamp.fromDate(tenMinutesAgo))
+    );
 
-    socket.onmessage = (event) => {
-      const message = JSON.parse(event.data);
-      if (message.type === "SYNC_VOTES" || message.type === "VOTE_UPDATE") {
-        const yes = message.votes.yes || 0;
-        const no = message.votes.no || 0;
-        setResults({
-          yes,
-          no,
-          total: yes + no
-        });
-      }
-    };
+    // Subscribe to real-time updates
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      let yesCount = 0;
+      let noCount = 0;
+      
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        if (data.choice === "yes") yesCount++;
+        if (data.choice === "no") noCount++;
+      });
 
-    return () => {
-      socket.close();
-    };
+      setResults({
+        yes: yesCount,
+        no: noCount,
+        total: yesCount + noCount
+      });
+    }, (error) => {
+      console.error("Firebase error:", error);
+    });
+
+    return () => unsubscribe();
   }, []);
 
   const nextSlide = () => setCurrentSlide((prev) => Math.min(prev + 1, 8));
@@ -48,10 +85,17 @@ export default function App() {
     setVote(choice);
   };
 
-  const submitVote = () => {
-    if (vote && socketRef.current?.readyState === WebSocket.OPEN) {
-      socketRef.current.send(JSON.stringify({ type: "VOTE", optionId: vote }));
-      nextSlide();
+  const submitVote = async () => {
+    if (vote) {
+      try {
+        await addDoc(collection(db, "votes"), {
+          choice: vote,
+          timestamp: serverTimestamp()
+        });
+        nextSlide();
+      } catch (err) {
+        console.error("Failed to submit vote:", err);
+      }
     }
   };
 
@@ -60,11 +104,42 @@ export default function App() {
     setVote(null);
   };
 
-  const resetVotes = () => {
-    if (socketRef.current?.readyState === WebSocket.OPEN) {
-      socketRef.current.send(JSON.stringify({ type: "RESET_VOTES" }));
+  const resetVotes = async () => {
+    try {
+      const snapshot = await getDocs(collection(db, "votes"));
+      const batch = writeBatch(db);
+      snapshot.forEach((doc) => {
+        batch.delete(doc.ref);
+      });
+      await batch.commit();
+      setVote(null);
+    } catch (err) {
+      console.error("Failed to reset votes:", err);
     }
-    setVote(null);
+  };
+
+  const downloadCSV = async () => {
+    try {
+      const snapshot = await getDocs(collection(db, "votes"));
+      let csv = "ID,Choice,Timestamp\n";
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        const ts = data.timestamp ? (data.timestamp as Timestamp).toDate().toISOString() : "N/A";
+        csv += `${doc.id},${data.choice},${ts}\n`;
+      });
+      
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.setAttribute('hidden', '');
+      a.setAttribute('href', url);
+      a.setAttribute('download', 'mars_votes_firebase.csv');
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch (err) {
+      console.error("Failed to export CSV:", err);
+    }
   };
 
   const slides = [
@@ -744,6 +819,16 @@ export default function App() {
                 Reset the Vote
               </span>
               <div className="absolute inset-0 bg-red-600 translate-y-full group-hover:translate-y-0 transition-transform duration-300"></div>
+            </button>
+            <button 
+              onClick={downloadCSV}
+              className="group relative px-4 py-1.5 border-2 border-mars-primary text-mars-primary font-black uppercase italic tracking-tighter text-xs rounded-none transition-all hover:bg-mars-primary hover:text-white overflow-hidden"
+            >
+              <span className="relative z-10 flex items-center gap-2">
+                <MaterialIcon name="download" className="text-sm font-black" />
+                Export to Spreadsheet (CSV)
+              </span>
+              <div className="absolute inset-0 bg-mars-primary translate-y-full group-hover:translate-y-0 transition-transform duration-300"></div>
             </button>
           </div>
         </div>
